@@ -15,7 +15,8 @@
 #include <sys/time.h>
 #include <unistd.h>
 
-#define RDMA_TRANSFER_TIMEOUT_MS 5000
+#define RDMA_CM_TIMEOUT_MS 5000
+#define RDMA_WC_TIMEOUT_MS 120000
 
 enum control_message_type {
     CONTROL_BUFFER_INFO = 1,
@@ -67,6 +68,24 @@ static int report_error(int verbose, const char *message) {
     return -1;
 }
 
+static int get_wc_timeout_ms(void) {
+    const char *timeout_env = getenv("RDMA_WC_TIMEOUT_MS");
+    char *end_ptr = NULL;
+    long timeout_ms;
+
+    if (timeout_env == NULL || timeout_env[0] == '\0') {
+        return RDMA_WC_TIMEOUT_MS;
+    }
+
+    timeout_ms = strtol(timeout_env, &end_ptr, 10);
+    if (end_ptr == timeout_env || *end_ptr != '\0' || timeout_ms <= 0 ||
+        timeout_ms > INT32_MAX) {
+        return RDMA_WC_TIMEOUT_MS;
+    }
+
+    return (int)timeout_ms;
+}
+
 static int wait_for_cm_event(struct rdma_event_channel *channel,
                              enum rdma_cm_event_type expected_type,
                              struct rdma_cm_event **event_out,
@@ -93,7 +112,7 @@ static int wait_for_cm_event(struct rdma_event_channel *channel,
 static int wait_for_wc(struct ibv_cq *cq, enum ibv_wc_opcode expected_opcode,
                        int verbose) {
     struct ibv_wc wc;
-    double deadline_ms = get_time_ms() + RDMA_TRANSFER_TIMEOUT_MS;
+    double deadline_ms = get_time_ms() + get_wc_timeout_ms();
 
     while (get_time_ms() < deadline_ms) {
         int poll_result = ibv_poll_cq(cq, 1, &wc);
@@ -498,7 +517,7 @@ int run_rdma_file_write_client(const char *server_ip, uint16_t port,
     }
 
     if (rdma_resolve_addr(endpoint.id, NULL, (struct sockaddr *)&server_addr,
-                          RDMA_TRANSFER_TIMEOUT_MS) != 0) {
+                          RDMA_CM_TIMEOUT_MS) != 0) {
         cleanup_endpoint(&endpoint);
         return report_error(verbose, "rdma_resolve_addr");
     }
@@ -510,7 +529,7 @@ int run_rdma_file_write_client(const char *server_ip, uint16_t port,
     }
     rdma_ack_cm_event(event);
 
-    if (rdma_resolve_route(endpoint.id, RDMA_TRANSFER_TIMEOUT_MS) != 0) {
+    if (rdma_resolve_route(endpoint.id, RDMA_CM_TIMEOUT_MS) != 0) {
         cleanup_endpoint(&endpoint);
         return report_error(verbose, "rdma_resolve_route");
     }
