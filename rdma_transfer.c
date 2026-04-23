@@ -6,6 +6,7 @@
 #include <ifaddrs.h>
 #include <infiniband/verbs.h>
 #include <net/if.h>
+#include <poll.h>
 #include <pthread.h>
 #include <rdma/rdma_cma.h>
 #include <stdint.h>
@@ -15,7 +16,7 @@
 #include <sys/time.h>
 #include <unistd.h>
 
-#define RDMA_CM_TIMEOUT_MS 5000
+#define RDMA_CM_TIMEOUT_MS 120000
 #define RDMA_WC_TIMEOUT_MS 120000
 
 enum control_message_type {
@@ -86,11 +87,50 @@ static int get_wc_timeout_ms(void) {
     return (int)timeout_ms;
 }
 
+static int get_cm_timeout_ms(void) {
+    const char *timeout_env = getenv("RDMA_CM_TIMEOUT_MS");
+    char *end_ptr = NULL;
+    long timeout_ms;
+
+    if (timeout_env == NULL || timeout_env[0] == '\0') {
+        return RDMA_CM_TIMEOUT_MS;
+    }
+
+    timeout_ms = strtol(timeout_env, &end_ptr, 10);
+    if (end_ptr == timeout_env || *end_ptr != '\0' || timeout_ms <= 0 ||
+        timeout_ms > INT32_MAX) {
+        return RDMA_CM_TIMEOUT_MS;
+    }
+
+    return (int)timeout_ms;
+}
+
 static int wait_for_cm_event(struct rdma_event_channel *channel,
                              enum rdma_cm_event_type expected_type,
                              struct rdma_cm_event **event_out,
                              int verbose) {
     struct rdma_cm_event *event;
+    struct pollfd poll_fd;
+    int cm_timeout_ms = get_cm_timeout_ms();
+    int poll_result;
+
+    poll_fd.fd = channel->fd;
+    poll_fd.events = POLLIN;
+    poll_fd.revents = 0;
+
+    poll_result = poll(&poll_fd, 1, cm_timeout_ms);
+    if (poll_result < 0) {
+        return report_error(verbose, "poll(rdma cm event)");
+    }
+
+    if (poll_result == 0) {
+        if (verbose) {
+            fprintf(stderr,
+                    "Timed out waiting for RDMA CM event %d after %d ms\n",
+                    expected_type, cm_timeout_ms);
+        }
+        return -1;
+    }
 
     if (rdma_get_cm_event(channel, &event) != 0) {
         return report_error(verbose, "rdma_get_cm_event");
@@ -517,7 +557,7 @@ int run_rdma_file_write_client(const char *server_ip, uint16_t port,
     }
 
     if (rdma_resolve_addr(endpoint.id, NULL, (struct sockaddr *)&server_addr,
-                          RDMA_CM_TIMEOUT_MS) != 0) {
+                          get_cm_timeout_ms()) != 0) {
         cleanup_endpoint(&endpoint);
         return report_error(verbose, "rdma_resolve_addr");
     }
@@ -529,7 +569,7 @@ int run_rdma_file_write_client(const char *server_ip, uint16_t port,
     }
     rdma_ack_cm_event(event);
 
-    if (rdma_resolve_route(endpoint.id, RDMA_CM_TIMEOUT_MS) != 0) {
+    if (rdma_resolve_route(endpoint.id, get_cm_timeout_ms()) != 0) {
         cleanup_endpoint(&endpoint);
         return report_error(verbose, "rdma_resolve_route");
     }
