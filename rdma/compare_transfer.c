@@ -19,6 +19,8 @@
 #define DEFAULT_FILE "test_1gb.bin"
 #define BUFFER_SIZE (1024 * 1024)
 #define TRANSFER_MAGIC 0x54524652u
+#define TCP_CONNECT_RETRY_COUNT 50
+#define TCP_CONNECT_RETRY_DELAY_US 100000
 
 typedef enum {
     TRANSFER_MODE_SENDFILE = 1,
@@ -93,6 +95,7 @@ static int recv_all(int fd, void *buffer, size_t length) {
 static int connect_to_server(const char *server_ip, uint16_t port) {
     int sock_fd;
     struct sockaddr_in server_addr;
+    int attempt;
 
     sock_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (sock_fd < 0) {
@@ -109,13 +112,25 @@ static int connect_to_server(const char *server_ip, uint16_t port) {
         return -1;
     }
 
-    if (connect(sock_fd, (struct sockaddr *)&server_addr, sizeof(server_addr)) != 0) {
-        perror("connect");
-        close(sock_fd);
-        return -1;
+    for (attempt = 0; attempt < TCP_CONNECT_RETRY_COUNT; ++attempt) {
+        if (connect(sock_fd, (struct sockaddr *)&server_addr, sizeof(server_addr)) == 0) {
+            return sock_fd;
+        }
+
+        if (errno != ECONNREFUSED && errno != EINTR) {
+            perror("connect");
+            close(sock_fd);
+            return -1;
+        }
+
+        if (attempt + 1 < TCP_CONNECT_RETRY_COUNT) {
+            usleep(TCP_CONNECT_RETRY_DELAY_US);
+        }
     }
 
-    return sock_fd;
+    perror("connect");
+    close(sock_fd);
+    return -1;
 }
 
 static int send_transfer_header(int sock_fd, transfer_mode_t mode,
